@@ -5,3 +5,7 @@ Features
 - Melody Matching
 - Lyrics Matching
 - More to come.
+
+Built with react native, expo, and more ???.
+
+Web version for future.
