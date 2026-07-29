@@ -2,7 +2,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Image, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Card, H1, H2, HatchBox, Line, Mono, Wave } from '../components/UI';
 import { colors } from '../theme';
@@ -60,6 +60,21 @@ export default function HomeScreen() {
               </View>
             </Card>
           </Pressable>
+
+          <Pressable onPress={() => navigation.navigate('Find')}>
+            <Card style={styles.modeCard}>
+              <Mono>mode 03</Mono>
+              <H2 style={styles.modeTitle}>Find by features</H2>
+              <Mono>lyrics · artist · genre · decade · tempo</Mono>
+            </Card>
+          </Pressable>
+
+          <Pressable onPress={() => navigation.navigate('Training')}>
+            <Card style={styles.teachCard}>
+              <Mono>help it learn</Mono>
+              <H2 style={{ fontSize: 18 }}>Teach SongFinder a song →</H2>
+            </Card>
+          </Pressable>
         </View>
 
         <View style={styles.recentSection}>
@@ -73,8 +88,15 @@ export default function HomeScreen() {
               </>
             ) : (
               recent.map((e) => (
-                <Pressable key={e.id} onPress={() => navigation.navigate('Result', { song: e.song, method: e.method })}>
-                  <HatchBox width={44} height={44} radius={9} />
+                <Pressable
+                  key={e.id}
+                  onPress={() => navigation.navigate('Result', { song: e.song, method: e.method, mode: 'browse' })}
+                >
+                  {e.song.albumArtUrl ? (
+                    <Image source={{ uri: e.song.albumArtUrl }} style={styles.recentArt} />
+                  ) : (
+                    <HatchBox width={44} height={44} radius={9} />
+                  )}
                 </Pressable>
               ))
             )}
@@ -92,6 +114,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 34, marginTop: 4 },
   modes: { gap: 14 },
   modeCard: { gap: 8, padding: 18 },
+  teachCard: { gap: 6, padding: 14, borderStyle: 'dashed' },
   modeTitle: { fontSize: 24 },
   listenRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 2 },
   playDot: {
@@ -106,4 +129,5 @@ const styles = StyleSheet.create({
   playInner: { width: 13, height: 13, borderRadius: 7, backgroundColor: colors.ink },
   recentSection: { marginTop: 26, paddingBottom: 20 },
   recentRow: { flexDirection: 'row', gap: 8 },
+  recentArt: { width: 44, height: 44, borderRadius: 9, borderWidth: 1.5, borderColor: colors.ink },
 });

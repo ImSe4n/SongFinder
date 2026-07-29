@@ -31,5 +31,12 @@ export function useRhythmTap() {
         setCount(0);
     }, []);
 
-    return { tap, reset, heights, count };
+    const getRelativeTaps = useCallback(() => {
+        const ts = timestamps.current;
+        if (ts.length === 0) return [];
+        const first = ts[0];
+        return ts.map((t) => t - first);
+    }, []);
+
+    return { tap, reset, heights, count, getRelativeTaps };
 }

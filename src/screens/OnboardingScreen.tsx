@@ -5,46 +5,50 @@ import { Btn, H2, HandText, Line, Mono } from '../components/UI';
 import { colors } from '../theme';
 import { useLibrary } from '../store/LibraryContext';
 
-const STEPS = [
-  {
-    demo: (
-      <View style={{ alignItems: 'center' }}>
-        <HandText style={styles.demoText}>la · la · la</HandText>
-        <HandText style={styles.demoBecomes}>becomes</HandText>
-        <HandText style={[styles.demoText, styles.accent]}>tap · tap · tap</HandText>
-      </View>
-    ),
-    title: 'Sing it with your finger',
-    dotsOn: 0,
-  },
-  {
-    demo: (
-      <View style={styles.listenDemo}>
-        <View style={styles.listenRing} />
-        <View style={styles.listenDot} />
-      </View>
-    ),
-    title: 'Or just hold up your phone',
-    dotsOn: 1,
-  },
-  {
-    demo: (
-      <View style={styles.historyDemo}>
-        <View style={styles.historyLine} />
-        <View style={styles.historyLine} />
-        <View style={[styles.historyLine, { width: '55%' }]} />
-      </View>
-    ),
-    title: 'Every find, saved for later',
-    dotsOn: 2,
-  },
-];
+const STEP_COUNT = 3;
+
+function stepContent(step: number) {
+  switch (step) {
+    case 0:
+      return {
+        demo: (
+          <View style={{ alignItems: 'center' }}>
+            <HandText style={styles.demoText}>la · la · la</HandText>
+            <HandText style={styles.demoBecomes}>becomes</HandText>
+            <HandText style={[styles.demoText, styles.accent]}>tap · tap · tap</HandText>
+          </View>
+        ),
+        title: 'Sing it with your finger',
+      };
+    case 1:
+      return {
+        demo: (
+          <View style={styles.listenDemo}>
+            <View style={styles.listenRing} />
+            <View style={styles.listenDot} />
+          </View>
+        ),
+        title: 'Or just hold up your phone',
+      };
+    default:
+      return {
+        demo: (
+          <View style={styles.historyDemo}>
+            <View style={styles.historyLine} />
+            <View style={styles.historyLine} />
+            <View style={[styles.historyLine, { width: '55%' }]} />
+          </View>
+        ),
+        title: 'Every find, saved for later',
+      };
+  }
+}
 
 export default function OnboardingScreen({ navigation }: any) {
   const { finishOnboarding } = useLibrary();
   const [step, setStep] = useState(0);
-  const isLast = step === STEPS.length - 1;
-  const current = STEPS[step];
+  const isLast = step === STEP_COUNT - 1;
+  const current = stepContent(step);
 
   const finish = () => {
     finishOnboarding();
@@ -53,7 +57,7 @@ export default function OnboardingScreen({ navigation }: any) {
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.top}>
-        <Mono>{step + 1} / {STEPS.length}</Mono>
+        <Mono>{step + 1} / {STEP_COUNT}</Mono>
         <Pressable onPress={finish}>
           <Mono>skip</Mono>
         </Pressable>
@@ -76,7 +80,7 @@ export default function OnboardingScreen({ navigation }: any) {
       </View>
 
       <View style={styles.dots}>
-        {STEPS.map((_, i) => (
+        {Array.from({ length: STEP_COUNT }).map((_, i) => (
           <View key={i} style={[styles.dot, i === step && styles.dotOn]} />
         ))}
       </View>

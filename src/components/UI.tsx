@@ -13,12 +13,12 @@ export function Line({ width = '100%', height = 8, style }: { width?: number | `
   return <View style={[{ width, height, borderRadius: height / 2, backgroundColor: colors.line }, style]} />;
 }
 
-export function Mono({ children, style, color = colors.mono }: { children: React.ReactNode; style?: any; color?: string }) {
-  return <Text style={[styles.mono, { color }, style]}>{children}</Text>;
+export function Mono({ children, style, color = colors.mono, numberOfLines }: { children: React.ReactNode; style?: any; color?: string; numberOfLines?: number }) {
+  return <Text numberOfLines={numberOfLines} style={[styles.mono, { color }, style]}>{children}</Text>;
 }
 
-export function HandText({ children, style, bold = true }: { children: React.ReactNode; style?: any; bold?: boolean }) {
-  return <Text style={[{ fontFamily: bold ? fonts.hand : fonts.handRegular, color: colors.ink }, style]}>{children}</Text>;
+export function HandText({ children, style, bold = true, numberOfLines }: { children: React.ReactNode; style?: any; bold?: boolean; numberOfLines?: number }) {
+  return <Text numberOfLines={numberOfLines} style={[{ fontFamily: bold ? fonts.hand : fonts.handRegular, color: colors.ink }, style]}>{children}</Text>;
 }
 
 export function H1({ children, style }: { children: React.ReactNode; style?: any }) {

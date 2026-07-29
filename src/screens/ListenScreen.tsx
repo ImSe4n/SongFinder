@@ -1,13 +1,18 @@
 import { CompositeNavigationProp, useNavigation } from '@react-navigation/native';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Audio } from 'expo-av';
+import {
+    RecordingPresets,
+    requestRecordingPermissionsAsync,
+    setAudioModeAsync,
+    useAudioRecorder,
+} from 'expo-audio';
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Pressable, StyleSheet, View } from 'react-native';
+import { Animated, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Btn, HandText, Line, Mono } from '../components/UI';
 import { colors } from '../theme';
-import { randomMatch } from '../data/songs';
+import { ApiError, queryAudio } from '../api/client';
 import { MainTabParamList, RootStackParamList } from '../navigation/types';
 
 type Nav = CompositeNavigationProp<
@@ -15,13 +20,37 @@ type Nav = CompositeNavigationProp<
     NativeStackNavigationProp<RootStackParamList>
 >;
 
-const LISTEN_MS = 3200;
+// ~8s of audio gives the fingerprinter plenty of hashes to align.
+const LISTEN_MS = 8000;
+
+type Phase = 'requesting' | 'listening' | 'matching' | 'denied' | 'no_match' | 'error';
+
+const CAPTION: Record<Phase, string> = {
+    requesting: 'Getting the mic ready…',
+    listening: 'Play the song out loud',
+    matching: 'Hmm, let me think…',
+    denied: "Couldn't access the mic",
+    no_match: "I don't know that one yet",
+    error: 'Something went wrong',
+};
+
+const STATUS: Record<Phase, string> = {
+    requesting: 'starting…',
+    listening: 'listening…',
+    matching: 'matching…',
+    denied: 'microphone unavailable',
+    no_match: 'no match found',
+    error: 'connection trouble',
+};
 
 export default function ListenScreen() {
     const navigation = useNavigation<Nav>();
-    const [status, setStatus] = useState<'requesting' | 'listening' | 'denied'>('requesting');
+    const [phase, setPhase] = useState<Phase>('requesting');
+    const [errorDetail, setErrorDetail] = useState<string | null>(null);
+    const [attempt, setAttempt] = useState(0);
     const pulse = useRef(new Animated.Value(0)).current;
-    const recordingRef = useRef<Audio.Recording | null>(null);
+    const clipUriRef = useRef<string | null>(null);
+    const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
     useEffect(() => {
         let cancelled = false;
@@ -29,40 +58,73 @@ export default function ListenScreen() {
 
         (async () => {
             try {
-                const perm = await Audio.requestPermissionsAsync();
+                setPhase('requesting');
+                setErrorDetail(null);
+                clipUriRef.current = null;
+                const perm = await requestRecordingPermissionsAsync();
                 if (!perm.granted) {
-                    if (!cancelled) setStatus('denied');
+                    if (!cancelled) setPhase('denied');
                     return;
                 }
-                await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-                const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-                recordingRef.current = recording;
+                await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+                await recorder.prepareToRecordAsync();
                 if (cancelled) return;
-                setStatus('listening');
+                recorder.record();
+                setPhase('listening');
 
                 timer = setTimeout(async () => {
                     try {
-                        await recordingRef.current?.stopAndUnloadAsync();
-                    } catch { }
-                    if (!cancelled) {
-                        const song = randomMatch();
-                        navigation.replace('Result', { song, method: 'listened' });
+                        await recorder.stop();
+                        const uri = recorder.uri;
+                        if (cancelled || !uri) return;
+                        clipUriRef.current = uri;
+
+                        setPhase('matching');
+                        const result = await queryAudio(uri);
+                        if (cancelled) return;
+
+                        if (result.status === 'confident' && result.match) {
+                            navigation.replace('Result', {
+                                song: result.match,
+                                method: 'listened',
+                                candidates: result.candidates,
+                                audioUri: uri,
+                                queryLogId: result.queryLogId ?? undefined,
+                            });
+                        } else if (result.candidates.length > 0) {
+                            navigation.replace('Candidates', {
+                                candidates: result.candidates,
+                                audioUri: uri,
+                                queryLogId: result.queryLogId ?? undefined,
+                            });
+                        } else {
+                            setPhase('no_match');
+                        }
+                    } catch (err) {
+                        if (cancelled) return;
+                        console.error('[ListenScreen] queryAudio failed:', err);
+                        if (err instanceof ApiError) {
+                            setErrorDetail(err.message);
+                            setPhase('error');
+                        } else {
+                            setPhase('no_match');
+                        }
                     }
                 }, LISTEN_MS);
             } catch {
-                if (!cancelled) setStatus('denied');
+                if (!cancelled) setPhase('denied');
             }
         })();
 
         return () => {
             cancelled = true;
             clearTimeout(timer);
-            recordingRef.current?.stopAndUnloadAsync().catch(() => { });
+            recorder.stop().catch(() => {});
         };
-    }, []);
+    }, [attempt]);
 
     useEffect(() => {
-        if (status !== 'listening') return;
+        if (phase !== 'listening' && phase !== 'matching') return;
         const loop = Animated.loop(
             Animated.sequence([
                 Animated.timing(pulse, { toValue: 1, duration: 900, useNativeDriver: true }),
@@ -71,44 +133,67 @@ export default function ListenScreen() {
         );
         loop.start();
         return () => loop.stop();
-    }, [status]);
+    }, [phase]);
 
     const ringScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.15] });
+    const failed = phase === 'denied' || phase === 'no_match' || phase === 'error';
 
     return (
         <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
             <View style={styles.top}>
-                <Mono color="rgba(255,255,255,0.55)">
-                    {status === 'denied' ? 'microphone unavailable' : 'listening…'}
-                </Mono>
+                <Mono color="rgba(255,255,255,0.55)">{STATUS[phase]}</Mono>
             </View>
 
             <View style={styles.center}>
                 <Animated.View style={[styles.ringOuter, { transform: [{ scale: ringScale }] }]} />
                 <View style={styles.ringInner} />
-                <View style={styles.dot}>
+                <View style={[styles.dot, failed && styles.dotFailed]}>
                     <View style={styles.dotIcon} />
                 </View>
             </View>
 
             <View style={styles.textBlock}>
-                <HandText style={styles.caption}>
-                    {status === 'denied' ? "Couldn't access the mic" : 'Play the song out loud'}
-                </HandText>
-                <Line width="60%" style={{ marginTop: 10, alignSelf: 'center', backgroundColor: 'rgba(255,255,255,0.22)' }} />
+                <HandText style={styles.caption}>{CAPTION[phase]}</HandText>
+                {phase === 'error' && errorDetail && (
+                    <Mono color="rgba(255,255,255,0.5)" style={{ marginTop: 10, textAlign: 'center' }}>
+                        {errorDetail}
+                    </Mono>
+                )}
+                {phase === 'no_match' && (
+                    <Mono color="rgba(255,255,255,0.5)" style={{ marginTop: 10, textAlign: 'center' }}>
+                        teach it this recording so it knows next time
+                    </Mono>
+                )}
+                {(phase === 'listening' || phase === 'matching') && (
+                    <Line width="60%" style={{ marginTop: 10, alignSelf: 'center', backgroundColor: 'rgba(255,255,255,0.22)' }} />
+                )}
             </View>
 
             <View style={{ flex: 0.5 }} />
 
             <View style={styles.footer}>
-                <Mono color="rgba(255,255,255,0.5)">no music playing?</Mono>
-                <Btn
-                    label="Tap the rhythm instead"
-                    ghost
-                    dark
-                    style={{ width: 220 }}
-                    onPress={() => navigation.navigate('Tap')}
-                />
+                {failed ? (
+                    <>
+                        {phase === 'no_match' && clipUriRef.current && (
+                            <Btn
+                                label="Teach this recording"
+                                ghost
+                                dark
+                                style={{ width: 220, backgroundColor: colors.accent, borderColor: colors.accent }}
+                                onPress={() => navigation.navigate('Training', { audioUri: clipUriRef.current! })}
+                            />
+                        )}
+                        {phase !== 'denied' && (
+                            <Btn label="Listen again" ghost dark style={{ width: 220 }} onPress={() => setAttempt((a) => a + 1)} />
+                        )}
+                        <Btn label="Tap the rhythm instead" ghost dark style={{ width: 220 }} onPress={() => navigation.navigate('Tap')} />
+                    </>
+                ) : (
+                    <>
+                        <Mono color="rgba(255,255,255,0.5)">no music playing?</Mono>
+                        <Btn label="Tap the rhythm instead" ghost dark style={{ width: 220 }} onPress={() => navigation.navigate('Tap')} />
+                    </>
+                )}
             </View>
         </SafeAreaView>
     );
@@ -132,8 +217,9 @@ const styles = StyleSheet.create({
         shadowRadius: 30,
         shadowOffset: { width: 0, height: 0 },
     },
+    dotFailed: { backgroundColor: 'rgba(255,255,255,0.18)', shadowOpacity: 0 },
     dotIcon: { width: 36, height: 54, borderRadius: 18, borderWidth: 3, borderColor: '#fff' },
     textBlock: { alignItems: 'center', paddingHorizontal: 10 },
-    caption: { fontSize: 22, color: '#fff' },
+    caption: { fontSize: 22, color: '#fff', textAlign: 'center' },
     footer: { alignItems: 'center', gap: 10, paddingBottom: 18 },
 });

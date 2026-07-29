@@ -3,9 +3,9 @@ import type { CompositeNavigationProp } from '@react-navigation/native';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useMemo, useState } from 'react';
-import { Pressable, SectionList, StyleSheet, View } from 'react-native';
+import { Image, Pressable, SectionList, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Card, H1, HatchBox, Line, Mono, Chip } from '../components/UI';
+import { Card, H1, HandText, HatchBox, Mono, Chip } from '../components/UI';
 import { colors } from '../theme';
 import { useLibrary, LibraryEntry } from '../store/LibraryContext';
 import { MainTabParamList, RootStackParamList } from '../navigation/types';
@@ -79,12 +79,22 @@ export default function HistoryScreen() {
                     contentContainerStyle={{ paddingBottom: 20 }}
                     renderSectionHeader={({ section: { title } }) => <Mono style={styles.sectionLabel}>{title}</Mono>}
                     renderItem={({ item }) => (
-                        <Pressable onPress={() => navigation.navigate('Result', { song: item.song, method: item.method })}>
+                        <Pressable
+                            onPress={() =>
+                                navigation.navigate('Result', { song: item.song, method: item.method, mode: 'browse' })
+                            }
+                        >
                             <Card style={styles.row}>
-                                <HatchBox width={40} height={40} radius={8} />
-                                <View style={{ flex: 1, gap: 6 }}>
-                                    <Line width="70%" />
-                                    <Line width="42%" height={6} />
+                                {item.song.albumArtUrl ? (
+                                    <Image source={{ uri: item.song.albumArtUrl }} style={styles.art} />
+                                ) : (
+                                    <HatchBox width={40} height={40} radius={8} />
+                                )}
+                                <View style={{ flex: 1, gap: 2 }}>
+                                    <HandText style={styles.rowTitle} numberOfLines={1}>{item.song.title}</HandText>
+                                    <Mono numberOfLines={1}>
+                                        {item.song.artist} · {item.method}
+                                    </Mono>
                                 </View>
                                 <Mono>▶</Mono>
                             </Card>
@@ -102,6 +112,8 @@ const styles = StyleSheet.create({
     header: { paddingTop: 6, paddingBottom: 12 },
     chipRow: { flexDirection: 'row', gap: 6, paddingBottom: 12 },
     sectionLabel: { paddingVertical: 8 },
+    art: { width: 40, height: 40, borderRadius: 8 },
+    rowTitle: { fontSize: 16 },
     row: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 9 },
     empty: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 80 },
 });
