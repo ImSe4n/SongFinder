@@ -31,6 +31,7 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript
@@ -39,3 +40,23 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+.claude
+CLAUDE.md
+AGENTS.md
+
+.venv
+*.pyc
+__pycache__/
+*.db
+*.db.backup-*
+.pytest_cache/
+
+# third-party research datasets — not ours to redistribute (e.g.
+# QBT-Extended is CC BY-NC-SA / non-commercial-only); see
+# backend/scripts/import_qbt_extended.py
+backend/data_import/
+
+# trained ML checkpoints — derivative works of the NC-licensed dataset above;
+# see backend/scripts/train_rhythm_model.py
+backend/models/
