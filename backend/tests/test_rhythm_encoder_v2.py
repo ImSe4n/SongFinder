@@ -84,12 +84,29 @@ def test_collate_2ch_padding_and_mask():
 
 
 def test_encoder_variable_length_normalized_both_backbones():
-    for backbone in ("tcn", "cnn"):
+    for backbone in ("tcn", "restcn", "cnn"):
         model = RhythmEncoderV2(backbone=backbone)
         feats = [featurize_v2([0, 200, 500, 900, 1300]), featurize_v2(list(range(0, 6000, 200)))]
         emb = model.embed(feats)
         assert emb.shape == (2, model.embed_dim)
         assert torch.allclose(emb.norm(dim=1), torch.ones(2), atol=1e-5)
+
+
+def test_restcn_embedding_unaffected_by_batch_padding():
+    """Padding must not leak into valid positions: a query embedded alone
+    (as in production) must match the same query inside a padded batch."""
+    torch.manual_seed(0)
+    model = RhythmEncoderV2(backbone="restcn")
+    short = featurize_v2([0, 200, 500, 900, 1200, 1600, 1900])
+    long = featurize_v2(list(range(0, 8000, 250)))
+    alone = model.embed([short])
+    batched = model.embed([short, long])[0:1]
+    assert torch.allclose(alone, batched, atol=1e-5)
+
+
+def test_unknown_backbone_rejected():
+    with pytest.raises(ValueError):
+        RhythmEncoderV2(backbone="lstm")
 
 
 def test_supcon_loss_lower_when_classes_separated():
@@ -112,6 +129,19 @@ def test_prototypical_loss_perfect_separation_high_accuracy():
     assert float(loss) < 0.5
 
 
+def test_prototypical_loss_can_converge_with_many_classes():
+    """With unit-norm embeddings, raw -distance logits span at most 2 nats, so
+    a perfect 12-way episode would still have loss ~0.9. The temperature-
+    scaled squared distance lets a perfect embedding reach ~0 loss."""
+    n_classes, per_class = 12, 5
+    protos = torch.nn.functional.normalize(torch.eye(n_classes, 16), dim=1)
+    e = protos.repeat_interleave(per_class, dim=0)
+    labels = torch.arange(n_classes).repeat_interleave(per_class)
+    loss, acc = prototypical_loss(e, labels, n_support=3)
+    assert float(acc) == 1.0
+    assert float(loss) < 0.01
+
+
 def test_diagnostics_detect_collapse_vs_separation():
     labels = torch.tensor([0, 0, 1, 1])
     collapsed = torch.nn.functional.normalize(torch.ones(4, 8) + 1e-4 * torch.randn(4, 8), dim=1)
@@ -132,6 +162,31 @@ def test_v2_save_load_roundtrip(tmp_path):
     feats = [featurize_v2([0, 200, 500, 900, 1300])]
     assert torch.allclose(model.embed(feats), loaded.embed(feats), atol=1e-6)
     assert meta["loss"] == "supcon"
+
+
+def test_restcn_save_load_roundtrip(tmp_path):
+    torch.manual_seed(0)
+    model = RhythmEncoderV2(backbone="restcn")
+    path = tmp_path / "v2r.pt"
+    save_encoder_v2(model, path)
+    loaded, _ = load_encoder_v2(path)
+    assert loaded.backbone_kind == "restcn"
+    feats = [featurize_v2([0, 200, 500, 900, 1300, 1500])]
+    assert torch.allclose(model.embed(feats), loaded.embed(feats), atol=1e-6)
+
+
+def test_loads_checkpoint_with_legacy_unused_gate_param(tmp_path):
+    """Checkpoints trained before the unused `mean_max_gate` parameter was
+    removed must still load (and produce the same embeddings)."""
+    model = RhythmEncoderV2(backbone="tcn")
+    path = tmp_path / "legacy.pt"
+    save_encoder_v2(model, path)
+    payload = torch.load(path, weights_only=True)
+    payload["state_dict"]["mean_max_gate"] = torch.zeros(1)
+    torch.save(payload, path)
+    loaded, _ = load_encoder_v2(path)
+    feats = [featurize_v2([0, 200, 500, 900, 1300])]
+    assert torch.allclose(model.embed(feats), loaded.embed(feats), atol=1e-6)
 
 
 def test_training_smoke_supcon_separates_two_rhythms():

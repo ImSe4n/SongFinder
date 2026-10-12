@@ -5,9 +5,12 @@ Everything comparable to the v1 run: same split code, same seed, same
 retrieval database, same four eval conditions. New here:
 
   --loss {supcon,proto}   which non-collapsing objective to train
-  --backbone {tcn,cnn}    dilated-TCN vs plain-CNN backbone
+  --backbone {tcn,restcn,cnn}  dilated-TCN, residual dilated-TCN, or plain CNN
   --no-aug / --no-2ch     ablation switches (2-channel + augmentation are on
                           by default; turning them off isolates their effect)
+
+Checkpoint selection uses a validation set carved from the training samples
+(carve_validation), never the reported seen/unseen queries.
 
 Prints per-epoch collapse diagnostics (alignment / uniformity / separation /
 effective-rank) so we can SEE whether the collapse that killed v1 is fixed,
@@ -45,6 +48,7 @@ BATCH_SONGS = 12
 BATCH_SAMPLES_PER_SONG = 6  # K; proto uses n_support of these + rest as queries
 PROTO_SUPPORT = 3
 CROP_MIN_TAPS = 8
+VAL_SAMPLES_PER_SONG = 2
 
 
 def featurize_sample(model_uses_2ch, taps, rng=None, augment=False):
@@ -58,6 +62,8 @@ def eval_model_v2(model, queries, database, short: bool) -> tuple[float, float]:
 
     from app.ml.rhythm_encoder_v2 import featurize_v2
 
+    if not queries:
+        return 0.0, 0.0
     db_feats = [featurize_v2(s.taps_ms) for s in database]
     db_ids = [s.song_id for s in database]
     db_emb = model.embed(db_feats)
@@ -90,7 +96,33 @@ def eval_dtw_1nn(queries, database, short: bool) -> tuple[float, float]:
     return _topk_accuracy(ranked, truths, 1), _topk_accuracy(ranked, truths, 5)
 
 
-def train_supcon(split, model, epochs, rng, augment):
+def carve_validation(split, rng, per_song: int = VAL_SAMPLES_PER_SONG) -> list:
+    """Move a few training samples per seen song into a validation set for
+    checkpoint selection, so the reported seen-query numbers come from
+    queries that played no part in picking the checkpoint.
+
+    Only samples that are NOT in the retrieval database are eligible —
+    make_split puts the first DB_SAMPLES_PER_SONG training samples of each
+    seen song in the database too, and a validation query that is also a
+    database entry would trivially match itself. Songs without spare samples
+    beyond that and a minimal training pool just contribute none."""
+    in_db = {id(s) for s in split.database}
+    by_song = defaultdict(list)
+    for s in split.train:
+        by_song[s.song_id].append(s)
+    val, val_ids = [], set()
+    for items in by_song.values():
+        spare = [s for s in items if id(s) not in in_db]
+        if len(items) - per_song < BATCH_SAMPLES_PER_SONG or len(spare) < per_song:
+            continue
+        for s in rng.sample(spare, per_song):
+            val.append(s)
+            val_ids.add(id(s))
+    split.train = [s for s in split.train if id(s) not in val_ids]
+    return val
+
+
+def train_supcon(split, val_queries, model, epochs, rng, augment):
     import torch
 
     from app.ml.rhythm_encoder_v2 import (
@@ -133,14 +165,14 @@ def train_supcon(split, model, epochs, rng, augment):
         sched.step()
 
         if epoch % 10 == 0 or epoch == epochs:
-            top1, top5 = eval_model_v2(model, split.seen_queries, split.database, short=False)
-            short_top1, _ = eval_model_v2(model, split.seen_queries, split.database, short=True)
+            top1, top5 = eval_model_v2(model, val_queries, split.database, short=False)
+            short_top1, _ = eval_model_v2(model, val_queries, split.database, short=True)
             with torch.no_grad():
                 db_emb = model.embed([featurize_v2(s.taps_ms) for s in split.database])
                 diag = embedding_diagnostics(db_emb, torch.tensor([s.song_id for s in split.database]))
             print(
                 f"  epoch {epoch:3d}/{epochs}  loss {total/steps:.3f}  "
-                f"seen top1 {top1:.1%} short-top1 {short_top1:.1%}  | sep {diag['separation']:.2f} "
+                f"val top1 {top1:.1%} short-top1 {short_top1:.1%}  | sep {diag['separation']:.2f} "
                 f"effrank {diag['eff_rank']:.0f} align {diag['align']:.3f} unif {diag['uniform']:.2f}"
             )
             # Model selection: blend full- and short-query top1, not full alone.
@@ -157,7 +189,7 @@ def train_supcon(split, model, epochs, rng, augment):
     return model
 
 
-def train_proto(split, model, epochs, rng, augment):
+def train_proto(split, val_queries, model, epochs, rng, augment):
     import torch
 
     from app.ml.rhythm_encoder_v2 import (
@@ -205,14 +237,14 @@ def train_proto(split, model, epochs, rng, augment):
         sched.step()
 
         if epoch % 10 == 0 or epoch == epochs:
-            top1, top5 = eval_model_v2(model, split.seen_queries, split.database, short=False)
-            short_top1, _ = eval_model_v2(model, split.seen_queries, split.database, short=True)
+            top1, top5 = eval_model_v2(model, val_queries, split.database, short=False)
+            short_top1, _ = eval_model_v2(model, val_queries, split.database, short=True)
             with torch.no_grad():
                 db_emb = model.embed([featurize_v2(s.taps_ms) for s in split.database])
                 diag = embedding_diagnostics(db_emb, torch.tensor([s.song_id for s in split.database]))
             print(
                 f"  epoch {epoch:3d}/{epochs}  loss {total/episodes:.3f} epiacc {acc_sum/episodes:.1%}  "
-                f"seen top1 {top1:.1%} short-top1 {short_top1:.1%}  | sep {diag['separation']:.2f} "
+                f"val top1 {top1:.1%} short-top1 {short_top1:.1%}  | sep {diag['separation']:.2f} "
                 f"effrank {diag['eff_rank']:.0f} align {diag['align']:.3f} unif {diag['uniform']:.2f}"
             )
             # See train_supcon's identical comment: blend short+full so model
@@ -231,7 +263,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="songfinder.db")
     parser.add_argument("--loss", choices=["supcon", "proto"], default="supcon")
-    parser.add_argument("--backbone", choices=["tcn", "cnn"], default="tcn")
+    parser.add_argument("--backbone", choices=["tcn", "restcn", "cnn"], default="tcn")
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--no-aug", action="store_true")
     parser.add_argument("--quick", action="store_true")
@@ -250,10 +282,11 @@ def main() -> int:
     split = make_split(samples, rng)
     n_db_songs = len({s.song_id for s in split.database})
     augment = not args.no_aug
+    val_queries = carve_validation(split, rng)
     print(
         f"[{args.tag or args.loss}] corpus {len(samples)} | train {len(split.train)} | "
         f"db {len(split.database)}/{n_db_songs} songs | "
-        f"queries {len(split.seen_queries)} seen / {len(split.unseen_queries)} unseen | "
+        f"val {len(val_queries)} | queries {len(split.seen_queries)} seen / {len(split.unseen_queries)} unseen | "
         f"loss={args.loss} backbone={args.backbone} aug={augment}"
     )
     print(f"chance top-1 ≈ {1/n_db_songs:.1%}\n")
@@ -262,13 +295,14 @@ def main() -> int:
     if args.quick:
         split.seen_queries = split.seen_queries[:40]
         split.unseen_queries = split.unseen_queries[:20]
+        val_queries = val_queries[:40]
 
     model = RhythmEncoderV2(backbone=args.backbone)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model params: {n_params:,}\nTraining ({args.loss})...")
     started = time.monotonic()
     trainer = train_supcon if args.loss == "supcon" else train_proto
-    model = trainer(split, model, epochs, rng, augment)
+    model = trainer(split, val_queries, model, epochs, rng, augment)
     print(f"training took {time.monotonic()-started:.0f}s\n")
 
     conditions = [

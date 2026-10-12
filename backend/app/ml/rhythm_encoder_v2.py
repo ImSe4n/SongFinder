@@ -27,6 +27,14 @@ Independently-motivated changes, each traceable to a specific finding:
 * Attention pooling instead of mean+max; optional dilated-TCN backbone for a
   full-sequence receptive field without RNN overfit risk at ~3k samples.
 
+* "restcn" backbone (opt-in): the same dilated receptive field, but built from
+  pre-norm residual blocks with dropout. The plain "tcn" stack has no skip
+  paths or normalization, so every layer must preserve the signal on its own;
+  residual blocks make the depth safe to train and regularize a ~3k-sample
+  corpus. Per-timestep LayerNorm (over channels) is used rather than
+  BatchNorm/GroupNorm because it never mixes in padded positions, so an
+  embedding stays identical whether the query is embedded alone or batched.
+
 Training-data provenance is unchanged from v1: mostly QBT-Extended
 (CC BY-NC-SA, non-commercial). Checkpoints are derivative works — keep them
 out of git (backend/models/ is ignored).
@@ -204,6 +212,23 @@ class AttentionPool(nn.Module):
         return (h * weights).sum(dim=2)  # (B, C)
 
 
+class ResidualTCNBlock(nn.Module):
+    """Pre-norm residual block: LN -> ReLU -> dilated conv -> dropout, + skip.
+    Padded positions are re-zeroed after the conv so they never leak into
+    valid ones through the next layer's kernel."""
+
+    def __init__(self, channels: int, dilation: int, dropout: float):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels)
+        self.conv = nn.Conv1d(channels, channels, kernel_size=3, padding=dilation, dilation=dilation)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, h: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        y = self.norm(h.transpose(1, 2)).transpose(1, 2)
+        y = self.drop(self.conv(F.relu(y))).masked_fill(~m, 0.0)
+        return h + y
+
+
 class RhythmEncoderV2(nn.Module):
     def __init__(self, embed_dim: int = EMBED_DIM, backbone: str = "tcn"):
         super().__init__()
@@ -220,7 +245,15 @@ class RhythmEncoderV2(nn.Module):
                     nn.Conv1d(64, 64, kernel_size=3, padding=8, dilation=8),
                 ]
             )
-        else:  # "cnn" — plain stack, closer to v1 but 2-channel input
+        elif backbone == "restcn":
+            # stem lifts 2 -> 64 channels, then residual dilated blocks; same
+            # receptive field as "tcn" (31 IOIs) with two blocks per dilation
+            self.stem = nn.Conv1d(2, 64, kernel_size=3, padding=1)
+            self.blocks = nn.ModuleList(
+                [ResidualTCNBlock(64, d, dropout=0.1) for d in (1, 2, 4, 8, 1, 2, 4, 8)]
+            )
+            self.out_norm = nn.LayerNorm(64)
+        elif backbone == "cnn":  # plain stack, closer to v1 but 2-channel input
             self.convs = nn.ModuleList(
                 [
                     nn.Conv1d(2, 32, kernel_size=3, padding=1),
@@ -228,17 +261,28 @@ class RhythmEncoderV2(nn.Module):
                     nn.Conv1d(64, 64, kernel_size=3, padding=1),
                 ]
             )
+        else:
+            raise ValueError(f"unknown backbone {backbone!r}")
         self.act = nn.ReLU()
         self.attn = AttentionPool(64)
-        self.mean_max_gate = nn.Parameter(torch.zeros(1))  # blend attn with mean/max
         self.proj = nn.Linear(64 * 2, embed_dim)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        m = mask.unsqueeze(1)  # (B, 1, L)
+    def _backbone(self, x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        if self.backbone_kind == "restcn":
+            h = self.stem(x).masked_fill(~m, 0.0)
+            for block in self.blocks:
+                h = block(h, m)
+            h = F.relu(self.out_norm(h.transpose(1, 2)).transpose(1, 2))
+            return h.masked_fill(~m, 0.0)
         h = x
         for conv in self.convs:
             h = self.act(conv(h))
             h = h.masked_fill(~m, 0.0)
+        return h
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        m = mask.unsqueeze(1)  # (B, 1, L)
+        h = self._backbone(x, m)
 
         attn_pool = self.attn(h, mask)
         valid = mask.sum(dim=1, keepdim=True).clamp(min=1)
@@ -282,11 +326,20 @@ def supcon_loss(embeddings: torch.Tensor, labels: torch.Tensor, temperature: flo
 
 
 def prototypical_loss(
-    embeddings: torch.Tensor, labels: torch.Tensor, n_support: int
+    embeddings: torch.Tensor, labels: torch.Tensor, n_support: int, temperature: float = 0.1
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Prototypical-network episodic loss (Snell et al. 2017). For each class,
     the first `n_support` samples form a prototype (mean); the rest are queries
     classified by nearest prototype. Returns (loss, accuracy).
+
+    Logits are -squared_distance / (2 * temperature). Snell uses squared
+    Euclidean distance; the temperature matters because our embeddings are
+    unit-norm, so raw distances live in [0, 2]. Plain `-dist` logits span at
+    most 2 nats: with 12 classes even a perfect embedding can't put more than
+    ~40% probability on the right one, so the loss can never converge and
+    keeps pushing on already-correct episodes. For unit vectors
+    d^2 / 2 = 1 - cos, so this equals cosine / temperature up to a constant —
+    the same scale SupCon trains with.
 
     Assumes the batch is laid out as consecutive blocks per class with at
     least n_support+1 samples each (the episodic sampler guarantees this)."""
@@ -305,8 +358,8 @@ def prototypical_loss(
     q = torch.cat(query_embs)  # (Q, D)
     targets = torch.cat(query_targets)  # (Q,)
 
-    dists = torch.cdist(q, protos)  # (Q, C)
-    logits = -dists
+    sq_dists = torch.cdist(q, protos).pow(2)  # (Q, C)
+    logits = -sq_dists / (2.0 * temperature)
     loss = F.cross_entropy(logits, targets)
     acc = (logits.argmax(dim=1) == targets).float().mean()
     return loss, acc
@@ -367,6 +420,10 @@ def save_encoder_v2(model: RhythmEncoderV2, path, meta: dict | None = None) -> N
 def load_encoder_v2(path) -> tuple[RhythmEncoderV2, dict]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     model = RhythmEncoderV2(embed_dim=payload["embed_dim"], backbone=payload.get("backbone", "tcn"))
-    model.load_state_dict(payload["state_dict"])
+    state = payload["state_dict"]
+    # Checkpoints saved before this parameter was removed still carry it; it
+    # was never used in forward(), so dropping it changes no outputs.
+    state.pop("mean_max_gate", None)
+    model.load_state_dict(state)
     model.eval()
     return model, payload.get("meta", {})
