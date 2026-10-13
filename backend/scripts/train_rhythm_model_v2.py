@@ -269,9 +269,18 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--out", default="models/rhythm_encoder_v2.pt")
     parser.add_argument("--tag", default="", help="label printed in the results header")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="torch CPU threads. The model is tiny, so per-op threading overhead dominates: "
+        "measured 0.8s/epoch at 1 thread vs 27s/epoch at 4 (two runs sharing 4 cores)",
+    )
     args = parser.parse_args()
 
     import torch
+
+    torch.set_num_threads(args.threads)
 
     from app.ml.rhythm_encoder_v2 import RhythmEncoderV2, save_encoder_v2
 
